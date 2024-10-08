@@ -7,6 +7,14 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <None Remove="StageLightningControl\TcpExample.js" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="StageLightningControl\TcpExample.js" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Reference Include="0Harmony">
       <HintPath>..\..\..\..\..\..\Downloads\RustDedicated_Data\Managed\0Harmony.dll</HintPath>
     </Reference>
