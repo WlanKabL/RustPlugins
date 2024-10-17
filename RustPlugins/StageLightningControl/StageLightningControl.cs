@@ -1,63 +1,40 @@
 ﻿using System.Net;
 using System.Net.Sockets;
 using System.Text;
-using UnityEngine;
 using System;
 using System.Threading.Tasks;
-using Oxide.Core.Plugins;
-using System.Linq;
 using System.Collections.Generic;
+using System.Linq;
+using Newtonsoft.Json;
+using UnityEngine;
+using Oxide.Core.Plugins;
 using Network;
 
 namespace Oxide.Plugins
 {
-    [Info("StageLightningControl", "WlanKabL", "1.0.0")]
+    [Info("StageLightningControl", "WlanKabL", "1.1.0")]
     public class StageLightningControl : RustPlugin
     {
-
         private BasePlayer? _tcpOwnerPlayer;
         private TcpListener? _tcpListener;
         private List<TcpClient> _clientList = new List<TcpClient>();
         private bool _isRunning = false;
         private int _port = 13377;
 
-        void OnServerInitialized()
-        {
-            Puts("TCP StageLightningControl initialized.");
-        }
-
-        void OnPluginUnloaded(Plugin plugin)
-        {
-            if (_tcpListener != null)
-            {
-                Log("Stopping TCP Listener before plugin unload.");
-                _tcpListener.Stop();
-                _tcpListener = null;
-            }
-        }
+        void OnServerInitialized() => Puts("TCP StageLightningControl initialized.");
+        void OnPluginUnloaded(Plugin plugin) => StopTcpServer();
 
         [ChatCommand("starttcp")]
         void StartTcpCommand(BasePlayer player, string command, string[] args)
         {
-            if (args.Length > 0 && args[0] != null)
+            if (args.Length > 0 && int.TryParse(args[0], out int port) && port >= 1000 && port <= 65535)
             {
-                if (int.TryParse(args[0], out int port))
-                {
-                    if (port >= 1000 && port <= 65535)
-                    {
-                        // Der Port ist innerhalb des gültigen Bereichs
-                        _port = port;
-                        Log($"Valid port set to: {_port}", player);
-                    } else
-                    {
-                        Log("Please choose a port between 1000 & 65535", player);
-                        return;
-                    }
-                }
-            } else
+                _port = port;
+                Log($"Valid port set to: {_port}", player);
+            }
+            else
             {
-                Log($"Command parameter has to be int to set port", player);
-                return;
+                Log("Using default port " + _port, player);
             }
 
             if (_tcpListener == null)
@@ -74,70 +51,65 @@ namespace Oxide.Plugins
             {
                 Log("Starting TCP server...", player);
                 _tcpOwnerPlayer = player;
-                StartTcpServer(); // Startet den TCP-Server
+                StartTcpServer();
                 Log("TCP server started.", player);
             }
             catch (Exception ex)
             {
-                Log($"Error starting TCP server: {ex.ToString()}", player);
+                Log($"Error starting TCP server: {ex}", player);
             }
         }
 
         [ChatCommand("stoptcp")]
         void StopTcpCommand(BasePlayer player)
         {
-            if (_isRunning)
+            if (!_isRunning)
             {
                 Log("TCP server is not running.", player);
+                return;
             }
 
             try
             {
-                StopTcpServer(player);
+                StopTcpServer();
+                Log("TCP server stopped.", player);
             }
             catch (Exception ex)
             {
-                Log($"Error stopping TCP server: {ex.ToString()}", player);
+                Log($"Error stopping TCP server: {ex}", player);
             }
         }
 
-        private void StartTcpServer(BasePlayer? player = null)
+        private void StartTcpServer()
         {
             if (_tcpListener == null)
             {
-                Log("TCP Instance not defined.", player);
+                Log("TCP Instance not defined.");
                 return;
             }
             _tcpListener.Start();
             _isRunning = true;
 
-            // Start listening for client connections asynchronously
             Task.Run(() => ListenForClients());
         }
 
-        private void StopTcpServer(BasePlayer? player = null)
+        private void StopTcpServer()
         {
-            Log("Try stopping TCP server...", player);
+            Log("Stopping TCP server...");
 
-            if (_clientList != null && _clientList.Count > 0 && _clientList.Any(c => c.Connected))
+            _clientList.ForEach(c =>
             {
-                Log("Closing connected client...", player);
-
-                _clientList.ForEach(c =>
+                if (c.Connected)
                 {
                     c.GetStream().Close();
                     c.Close();
-                    _clientList.Remove(c);
-                });
-                _clientList.Clear();
-            }
+                }
+            });
+            _clientList.Clear();
 
-            if (_tcpListener != null)
-            {
-                _tcpListener.Stop();
-                _isRunning = false;
-                Log("TCP server stopped.", player);
-            }
+            _tcpListener?.Stop();
+            _tcpListener = null;
+            _isRunning = false;
         }
 
         private async Task ListenForClients()
@@ -147,92 +119,15 @@ namespace Oxide.Plugins
             {
                 try
                 {
-                    if (_tcpListener == null || !_isRunning) break;
-
-                    // Accept an incoming client connection
                     TcpClient client = await _tcpListener.AcceptTcpClientAsync();
                     _clientList.Add(client);
-
                     Log("Client connected.");
-
-                    // Handle client communication
                     _ = Task.Run(() => HandleClientCommunication(client));
                 }
                 catch (Exception ex)
                 {
-                    Log($"Error accepting client: {ex.ToString()}");
+                    Log($"Error accepting client: {ex}");
                 }
-            }
-        }
-
-        private async Task HandleTcpCommand(string message)
-        {
-            Log("TCP Controller send following message: " + message);
-            SmartSwitch[] smartswitches = BaseNetworkable.serverEntities.OfType<SmartSwitch>().ToArray() as SmartSwitch[];
-            SmartSwitch? selectedSwitch = smartswitches.FirstOrDefault(smartSwitch =>
-            {
-                return smartSwitch.net.ID.ToString() == message;
-            });
-
-            if (selectedSwitch != null && !selectedSwitch.IsDestroyed)
-            {
-                Log("Smartswitch found: " + selectedSwitch.net.ID.ToString());
-                Log(selectedSwitch.OwnerID.ToString());
-                _ = Task.Run(() => SetSwitchState(selectedSwitch, !selectedSwitch.IsOn()));
-            }
-           
-        }
-
-        private async Task SetSwitchState(SmartSwitch smartSwitch, bool state)
-        {
-            try
-            {
-                
-                //smartSwitch.SendIONetworkUpdate();
-
-                Log("Try enabling smartswitch");
-
-                // Prüfe, ob der SmartSwitch Eingänge hat
-                if (smartSwitch.inputs == null || smartSwitch.inputs.Length == 0)
-                {
-                    Log("SmartSwitch has no inputs.");
-                    return;
-                }
-
-                // Prüfe den ersten Eingang und die Verbindung
-                var inputConnection = smartSwitch.inputs[0].connectedTo.Get();
-                if (inputConnection == null)
-                {
-                    Log("SmartSwitch is not connected to any input source.");
-                    //return;
-                }
-
-                // Logge den Typ der Verbindung, um sicherzustellen, dass sie korrekt ist
-                //Log($"SmartSwitch connected to: {inputConnection.GetType().Name}");
-
-                // Wenn der Eingang korrekt verbunden ist, schalte den SmartSwitch um
-                //if (state == false)
-                //    smartSwitch.UpdateHasPower(0, 0);
-                //else
-                //    smartSwitch.UpdateHasPower(200, 0);
-                smartSwitch.SetFlag(BaseEntity.Flags.On, state);
-                //smartSwitch.SendNetworkUpdate_Flags();
-                //smartSwitch.SetFlag(BaseEntity.Flags.InUse, false);
-                //smartSwitch.SetFlag(BaseEntity.Flags.Disabled, state);
-                //smartSwitch.SetFlag(BaseEntity.Flags.Busy, false); 
-                //smartSwitch.SetFlag(BaseEntity.Flags.Reserved7, false); // short circuit
-                //smartSwitch.SetFlag(BaseEntity.Flags.Reserved8, state);  //has power
-                //smartSwitch.SetFlag(BaseEntity.Flags.On, b: state);  //has power
-                //smartSwitch.SetSwitch(state);
-                smartSwitch.MarkDirty();
-
-                //smartSwitch.SendNetworkUpdateImmediate();
-
-                Log("SmartSwitch state successfully changed.");
-            }
-            catch (Exception ex)
-            {
-                Log($"Error communicating with switch: {ex.ToString()}");
             }
         }
 
@@ -240,60 +135,131 @@ namespace Oxide.Plugins
         {
             NetworkStream clientStream = client.GetStream();
             byte[] buffer = new byte[1024];
-            int bytesRead;
 
             while (_isRunning && client.Connected)
             {
                 try
                 {
-                    if (!clientStream.CanRead) continue;
-                    bytesRead = await clientStream.ReadAsync(buffer, 0, buffer.Length);
+                    int bytesRead = await clientStream.ReadAsync(buffer, 0, buffer.Length);
                     if (bytesRead == 0)
                     {
-                        // Client has disconnected
                         Log("Client disconnected.");
                         break;
                     }
 
-                    // Convert received bytes to a string message
                     string receivedMessage = Encoding.UTF8.GetString(buffer, 0, bytesRead);
                     Log($"Received: {receivedMessage}");
 
-                    await HandleTcpCommand(receivedMessage);
-
-                    // Process the message and send a response (here we just echo it back)
-                    string responseMessage = "connected";
-                    byte[] responseBytes = Encoding.UTF8.GetBytes(responseMessage);
-                    await clientStream.WriteAsync(responseBytes, 0, responseBytes.Length);
-                    Log($"Sent ({responseBytes.Length} bytes): {responseMessage}");
-
-
-                    if (receivedMessage == "stop")
+                    if (receivedMessage.StartsWith("{"))
                     {
-                        Log("Receive stop command from TCP.");
-                        StopTcpServer();
+                        try
+                        {
+                            var request = JsonConvert.DeserializeObject<SmartSwitchRequest>(receivedMessage);
+                            if (request?.EntityId != null)
+                            {
+                                await HandleTcpCommand(request.EntityId, request.State);
+                                var response = new SmartSwitchResponse(request.EntityId, true, "State updated successfully.");
+                                string responseMessage = JsonConvert.SerializeObject(response);
+                                byte[] responseBytes = Encoding.UTF8.GetBytes(responseMessage);
+                                await clientStream.WriteAsync(responseBytes, 0, responseBytes.Length);
+                            }
+                        }
+                        catch (JsonException)
+                        {
+                            Log("Invalid JSON format for SmartSwitchRequest. Processing as a generic message.");
+                        }
+                    }
+                    else
+                    {
+                        Log("Received non-JSON message. Processing as a generic string.");
                     }
                 }
                 catch (Exception ex)
                 {
-                    Log($"Error communicating with client: {ex.ToString()}");
+                    Log($"Error communicating with client: {ex}");
                     break;
                 }
             }
 
-            // Close client connection
             client.Close();
             _clientList.Remove(client);
             Log("Client connection closed.");
         }
 
-        private void Log(string message, BasePlayer? basePlayer = null)
+        [ChatCommand("send")]
+        void SendEntityToTcp(BasePlayer player)
         {
-            if (basePlayer == null && _tcpOwnerPlayer != null)
+            if (!_clientList.Any(c => c.Connected))
             {
-                basePlayer = _tcpOwnerPlayer;
+                Log("No TCP client connected. Please connect first.", player);
+                return;
             }
 
+            var target = RaycastAll<BaseEntity>(player.eyes.HeadRay());
+            if (target is BaseEntity targetEntity)
+            {
+                string targetId = targetEntity.net.ID.ToString();
+                SmartSwitchRequest request = new SmartSwitchRequest
+                {
+                    EntityId = targetId,
+                    State = true
+                };
+
+                string jsonRequest = JsonConvert.SerializeObject(request);
+                Log($"Sending request to TCP client: {jsonRequest}", player);
+
+                _clientList.ForEach(c =>
+                {
+                    if (c.Connected)
+                    {
+                        NetworkStream stream = c.GetStream();
+                        byte[] messageBytes = Encoding.UTF8.GetBytes(jsonRequest);
+                        stream.Write(messageBytes, 0, messageBytes.Length);
+                        stream.Flush();
+                    }
+                });
+            }
+            else
+            {
+                Log("No valid SmartSwitch found.", player);
+            }
+        }
+
+        private async Task HandleTcpCommand(string entityId, bool state)
+        {
+            Log($"Handling command to set SmartSwitch {entityId} to state {state}");
+            SmartSwitch? selectedSwitch = BaseNetworkable.serverEntities
+                .OfType<SmartSwitch>()
+                .FirstOrDefault(sw => sw.net.ID.ToString() == entityId);
+
+            if (selectedSwitch != null && !selectedSwitch.IsDestroyed)
+            {
+                Log($"SmartSwitch found: {selectedSwitch.net.ID}. Changing state...");
+                await SetSwitchState(selectedSwitch, state);
+            }
+            else
+            {
+                Log($"SmartSwitch with ID {entityId} not found.");
+            }
+        }
+
+        private async Task SetSwitchState(SmartSwitch smartSwitch, bool state)
+        {
+            try
+            {
+                Log("Toggling SmartSwitch...");
+                smartSwitch.SetFlag(BaseEntity.Flags.On, state);
+                smartSwitch.MarkDirty();
+                Log("SmartSwitch state successfully changed.");
+            }
+            catch (Exception ex)
+            {
+                Log($"Error communicating with SmartSwitch: {ex}");
+            }
+        }
+
+        private void Log(string message, BasePlayer? basePlayer = null)
+        {
             Puts(message);
             if (basePlayer != null)
             {
@@ -341,79 +307,42 @@ namespace Oxide.Plugins
             return target;
         }
 
-        string GetMsg(string key, BasePlayer player = null)
+        string GetMsg(string key, BasePlayer? player = null)
         {
             return lang.GetMessage(key, this, player == null ? null : player.UserIDString);
         }
 
-        bool TryGetEntity<T>(BasePlayer player, out BaseEntity entity) where T : BaseEntity
+        bool TryGetEntity<T>(BasePlayer player, out BaseEntity? entity) where T : BaseEntity
         {
             entity = null;
-
             var target = RaycastAll<BaseEntity>(player.eyes.HeadRay());
-
             if (target is T)
             {
                 entity = target as T;
                 return true;
             }
-
             return false;
         }
 
         #endregion
 
-        [ChatCommand("send")]
-        void SendEntityToTcp(BasePlayer player)
+        private class SmartSwitchRequest
         {
-            // Prüfen, ob ein TCP-Client verbunden ist
-            if (_clientList == null || !_clientList.Any(c => c.Connected))
+            public string? EntityId { get; set; }
+            public bool State { get; set; }
+        }
+
+        private class SmartSwitchResponse
+        {
+            public string EntityId { get; set; }
+            public bool Success { get; set; }
+            public string Message { get; set; }
+
+            public SmartSwitchResponse(string entityId, bool success, string message)
             {
-                Log("Fehler: Kein TCP-Client verbunden. Bitte zuerst eine Verbindung herstellen.", player);
-                return;
-            }
-
-            // Raycast durchführen, um eine Entität zu erfassen
-            var target = RaycastAll<BaseEntity>(player.eyes.HeadRay());
-            if (target is bool)
-            {
-                Log(GetMsg("Target: None", player), player);
-                return;
-            }
-
-            if (target is BaseEntity)
-            {
-                var targetEntity = target as BaseEntity;
-
-                if (targetEntity == null) return;
-
-                if (targetEntity is SmartSwitch)
-                {
-                    Log("Selected entity is smartswitch");
-                }
-                string targetId = targetEntity.net.ID.ToString();
-                string resultJson = $"{{\"entityId\":\"{targetId}\"}}";
-                Log($"{resultJson}", player);
-
-                // Senden der Nachricht an den verbundenen TCP-Client
-                try
-                {
-                    _clientList.ForEach(c =>
-                    {
-                        if (c.Connected)
-                        {
-                            NetworkStream stream = c.GetStream();
-                            byte[] messageBytes = Encoding.UTF8.GetBytes(resultJson);
-                            stream.Write(messageBytes, 0, messageBytes.Length);
-                            stream.Flush();
-                        }
-                    });
-                }
-                catch (Exception ex)
-                {
-                    Log($"Fehler beim Senden der Nachricht: {ex.ToString()}", player);
-                }
-                return;
+                EntityId = entityId;
+                Success = success;
+                Message = message;
             }
         }
     }
