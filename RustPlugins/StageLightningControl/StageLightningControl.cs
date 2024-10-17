@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using Oxide.Core.Plugins;
 using System.Linq;
 using System.Collections.Generic;
+using Network;
 
 namespace Oxide.Plugins
 {
@@ -186,6 +187,9 @@ namespace Oxide.Plugins
         {
             try
             {
+                
+                //smartSwitch.SendIONetworkUpdate();
+
                 Log("Try enabling smartswitch");
 
                 // Prüfe, ob der SmartSwitch Eingänge hat
@@ -207,11 +211,21 @@ namespace Oxide.Plugins
                 //Log($"SmartSwitch connected to: {inputConnection.GetType().Name}");
 
                 // Wenn der Eingang korrekt verbunden ist, schalte den SmartSwitch um
-                if (state == false)
-                    smartSwitch.UpdateHasPower(0, 0);
-                else
-                    smartSwitch.UpdateHasPower(200, 0);
+                //if (state == false)
+                //    smartSwitch.UpdateHasPower(0, 0);
+                //else
+                //    smartSwitch.UpdateHasPower(200, 0);
                 smartSwitch.SetFlag(BaseEntity.Flags.On, state);
+                //smartSwitch.SendNetworkUpdate_Flags();
+                //smartSwitch.SetFlag(BaseEntity.Flags.InUse, false);
+                //smartSwitch.SetFlag(BaseEntity.Flags.Disabled, state);
+                //smartSwitch.SetFlag(BaseEntity.Flags.Busy, false); 
+                //smartSwitch.SetFlag(BaseEntity.Flags.Reserved7, false); // short circuit
+                //smartSwitch.SetFlag(BaseEntity.Flags.Reserved8, state);  //has power
+                //smartSwitch.SetFlag(BaseEntity.Flags.On, b: state);  //has power
+                //smartSwitch.SetSwitch(state);
+                smartSwitch.MarkDirty();
+
                 //smartSwitch.SendNetworkUpdateImmediate();
 
                 Log("SmartSwitch state successfully changed.");
