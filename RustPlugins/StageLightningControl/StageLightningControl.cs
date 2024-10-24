@@ -9,6 +9,7 @@ using Newtonsoft.Json;
 using UnityEngine;
 using Oxide.Core.Plugins;
 using Network;
+using Newtonsoft.Json.Linq;
 
 namespace Oxide.Plugins
 {
@@ -66,7 +67,6 @@ namespace Oxide.Plugins
             if (!_isRunning)
             {
                 Log("TCP server is not running.", player);
-                return;
             }
 
             try
@@ -96,6 +96,7 @@ namespace Oxide.Plugins
         private void StopTcpServer()
         {
             Log("Stopping TCP server...");
+            _tcpListener?.Stop();
 
             _clientList.ForEach(c =>
             {
@@ -107,8 +108,7 @@ namespace Oxide.Plugins
             });
             _clientList.Clear();
 
-            _tcpListener?.Stop();
-            _tcpListener = null;
+            
             _isRunning = false;
         }
 
@@ -135,6 +135,7 @@ namespace Oxide.Plugins
         {
             NetworkStream clientStream = client.GetStream();
             byte[] buffer = new byte[1024];
+            StringBuilder messageBuilder = new StringBuilder();  // Zum Speichern von unvollständigen Nachrichten
 
             while (_isRunning && client.Connected)
             {
@@ -147,31 +148,93 @@ namespace Oxide.Plugins
                         break;
                     }
 
-                    string receivedMessage = Encoding.UTF8.GetString(buffer, 0, bytesRead);
-                    Log($"Received: {receivedMessage}");
+                    // Füge die empfangenen Daten zum StringBuilder hinzu
+                    string receivedData = Encoding.UTF8.GetString(buffer, 0, bytesRead);
+                    messageBuilder.Append(receivedData);
 
-                    if (receivedMessage.StartsWith("{"))
+                    // Verarbeite nur komplette Nachrichten, getrennt durch Semikolon
+                    string fullData = messageBuilder.ToString();
+                    string[] messages = fullData.Split("^"); // Trennzeichen: Semikolon
+
+                    // Die letzte Nachricht könnte unvollständig sein, also behalten wir sie für das nächste Lesen
+                    messageBuilder.Clear();
+                    if (!fullData.EndsWith("^"))
                     {
-                        try
+                        messageBuilder.Append(messages[^1]); // Die letzte unvollständige Nachricht behalten
+                        messages = messages.SkipLast(1).ToArray(); // Verarbeite alle anderen Nachrichten
+                    }
+
+                    foreach (string message in messages)
+                    {
+                        if (string.IsNullOrWhiteSpace(message)) continue; // Leere Nachrichten ignorieren
+
+                        Log($"Received: {message}");
+
+                        if (message.StartsWith("{"))
                         {
-                            var request = JsonConvert.DeserializeObject<SmartSwitchRequest>(receivedMessage);
-                            if (request?.EntityId != null)
+                            try
                             {
-                                await HandleTcpCommand(request.EntityId, request.State);
-                                var response = new SmartSwitchResponse(request.EntityId, true, "State updated successfully.");
-                                string responseMessage = JsonConvert.SerializeObject(response);
-                                byte[] responseBytes = Encoding.UTF8.GetBytes(responseMessage);
-                                await clientStream.WriteAsync(responseBytes, 0, responseBytes.Length);
+                                TcpMessage<object> request = JsonConvert.DeserializeObject<TcpMessage<object>>(message);
+                                switch (request.Type)
+                                {
+                                    case "control-smartswitch":
+                                        TcpMessage<SmartSwitchRequest> castedRequest = JsonConvert.DeserializeObject<TcpMessage<SmartSwitchRequest>>(message);
+
+                                        if (castedRequest == null)
+                                        {
+                                            TcpMessage<SmartSwitchResponse> errorResponseMessage = new TcpMessage<SmartSwitchResponse>
+                                            {
+                                                Type = "error",
+                                                Message = "Invalid request payload",
+                                            };
+                                            await SendTcpMessage(clientStream, errorResponseMessage);
+                                            return;
+                                        }
+
+                                        SmartSwitchRequest? payload = castedRequest.Payload;
+
+                                        if (payload?.EntityId == null)
+                                        {
+                                            TcpMessage<SmartSwitchResponse> errorResponseMessage = new TcpMessage<SmartSwitchResponse>
+                                            {
+                                                Type = "error",
+                                                Message = "EntityId is null",
+                                            };
+                                            await SendTcpMessage(clientStream, errorResponseMessage);
+                                            return;
+                                        }
+
+                                        bool setSwitchResult = HandleSmartSwitchChange(payload.EntityId, payload.State);
+                                        string setSwitchResultText = setSwitchResult ? "State updated successfully" : "Error while setting switch state";
+                                        SmartSwitchResponse response = new SmartSwitchResponse(payload.EntityId, setSwitchResult, setSwitchResultText, payload.State);
+                                        TcpMessage<SmartSwitchResponse> responseMessage = new TcpMessage<SmartSwitchResponse>
+                                        {
+                                            Type = "control-success",
+                                            Payload = response
+                                        };
+                                        await SendTcpMessage(clientStream, responseMessage);
+
+                                        break;
+                                    default:
+                                        TcpMessage<SmartSwitchResponse> defaultReponseMessage = new TcpMessage<SmartSwitchResponse>
+                                        {
+                                            Type = "error",
+                                            Message = "Unknown request type"
+                                        };
+                                        await SendTcpMessage(clientStream, defaultReponseMessage);
+                                        break;
+                                }
+
+                            }
+                            catch (JsonException)
+                            {
+                                Log("Invalid JSON format for SmartSwitchRequest. Processing as a generic message.");
                             }
                         }
-                        catch (JsonException)
+                        else
                         {
-                            Log("Invalid JSON format for SmartSwitchRequest. Processing as a generic message.");
+                            Log("Received non-JSON message. Processing as a generic string.");
                         }
-                    }
-                    else
-                    {
-                        Log("Received non-JSON message. Processing as a generic string.");
                     }
                 }
                 catch (Exception ex)
@@ -185,6 +248,14 @@ namespace Oxide.Plugins
             _clientList.Remove(client);
             Log("Client connection closed.");
         }
+
+        private async Task SendTcpMessage<T>(NetworkStream clientStream, TcpMessage<T> message)
+        {
+            string messageString = JsonConvert.SerializeObject(message);
+            byte[] responseBytes = Encoding.UTF8.GetBytes(messageString + '^');
+            await clientStream.WriteAsync(responseBytes, 0, responseBytes.Length);
+        }
+
 
         [ChatCommand("send")]
         void SendEntityToTcp(BasePlayer player)
@@ -202,20 +273,21 @@ namespace Oxide.Plugins
                 SmartSwitchRequest request = new SmartSwitchRequest
                 {
                     EntityId = targetId,
-                    State = true
+                    State = false
                 };
+                TcpMessage<SmartSwitchRequest> message = new TcpMessage<SmartSwitchRequest>
+                {
+                    Type = "send-smartswitch",
+                    Payload = request
+                };
+                
 
-                string jsonRequest = JsonConvert.SerializeObject(request);
-                Log($"Sending request to TCP client: {jsonRequest}", player);
-
-                _clientList.ForEach(c =>
+                _clientList.ForEach(async (c) =>
                 {
                     if (c.Connected)
                     {
                         NetworkStream stream = c.GetStream();
-                        byte[] messageBytes = Encoding.UTF8.GetBytes(jsonRequest);
-                        stream.Write(messageBytes, 0, messageBytes.Length);
-                        stream.Flush();
+                        await SendTcpMessage(stream, message);
                     }
                 });
             }
@@ -225,7 +297,7 @@ namespace Oxide.Plugins
             }
         }
 
-        private async Task HandleTcpCommand(string entityId, bool state)
+        private bool HandleSmartSwitchChange(string entityId, bool state)
         {
             Log($"Handling command to set SmartSwitch {entityId} to state {state}");
             SmartSwitch? selectedSwitch = BaseNetworkable.serverEntities
@@ -235,15 +307,16 @@ namespace Oxide.Plugins
             if (selectedSwitch != null && !selectedSwitch.IsDestroyed)
             {
                 Log($"SmartSwitch found: {selectedSwitch.net.ID}. Changing state...");
-                await SetSwitchState(selectedSwitch, state);
+                return SetSwitchState(selectedSwitch, state);
             }
             else
             {
                 Log($"SmartSwitch with ID {entityId} not found.");
+                return false;
             }
         }
 
-        private async Task SetSwitchState(SmartSwitch smartSwitch, bool state)
+        private bool SetSwitchState(SmartSwitch smartSwitch, bool state)
         {
             try
             {
@@ -251,10 +324,12 @@ namespace Oxide.Plugins
                 smartSwitch.SetFlag(BaseEntity.Flags.On, state);
                 smartSwitch.MarkDirty();
                 Log("SmartSwitch state successfully changed.");
+                return true;
             }
             catch (Exception ex)
             {
                 Log($"Error communicating with SmartSwitch: {ex}");
+                return false;
             }
         }
 
@@ -326,6 +401,13 @@ namespace Oxide.Plugins
 
         #endregion
 
+        private class TcpMessage<T>
+        {
+            public string Type { get; set; }
+            public T? Payload { get; set; }
+            public string? Message { get; set; }
+        }
+
         private class SmartSwitchRequest
         {
             public string? EntityId { get; set; }
@@ -337,12 +419,14 @@ namespace Oxide.Plugins
             public string EntityId { get; set; }
             public bool Success { get; set; }
             public string Message { get; set; }
+            public bool SwitchState { get; set; }
 
-            public SmartSwitchResponse(string entityId, bool success, string message)
+            public SmartSwitchResponse(string entityId, bool success, string message, bool switchState)
             {
                 EntityId = entityId;
                 Success = success;
                 Message = message;
+                SwitchState = switchState;
             }
         }
     }
